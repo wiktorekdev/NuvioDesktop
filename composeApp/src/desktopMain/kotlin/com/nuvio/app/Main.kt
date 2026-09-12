@@ -1,6 +1,8 @@
 package com.nuvio.app
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.configureSwingGlobalsForCompose
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -27,6 +29,7 @@ import com.nuvio.app.features.player.desktop.DesktopAppFullscreenController
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopWindowGeometry
 import com.nuvio.app.features.player.desktop.DesktopWindowModeStorage
+import com.nuvio.app.features.player.desktop.MprisBridge
 import com.nuvio.app.features.player.desktop.NativePlayerBridge
 import com.nuvio.app.features.player.desktop.applyNativeDesktopWindowChrome
 import com.nuvio.app.features.player.desktop.installDesktopAppFullscreenShortcuts
@@ -55,9 +58,11 @@ fun main(args: Array<String>) {
     SentryInitializer.start()
     configureDesktopQuickJsLibrary()
     configureDesktopChrome()
+    configureLinuxSwingGlobalsBeforeAwt()
     installDesktopOpenUriHandler()
     handleDesktopLaunchArgs(args)
     preloadNativePlayerBridgeAsync()
+    MprisBridge.start()
     // Load cached profile data synchronously so the profile color is available
     // on the very first Compose frame (matching Android's SharedPreferences behavior).
     ProfileRepository.loadCachedProfiles()
@@ -118,6 +123,7 @@ fun main(args: Array<String>) {
         Window(
             onCloseRequest = {
                 P2pStreamingEngine.shutdown()
+                MprisBridge.stop()
                 DiscordPresenceManager.shutdown()
                 SentryInitializer.close()
                 exitApplication()
@@ -229,6 +235,23 @@ private fun configureDesktopChrome() {
     if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
         System.setProperty("apple.awt.application.appearance", MacosDarkAquaAppearance)
     }
+}
+
+// application {} applies Compose's Swing globals, which on Linux include Skiko's
+// display-scale detection (it sets sun.java2d.uiScale). AWT reads that property
+// once, when its graphics environment starts, and installDesktopOpenUriHandler()
+// starts it before application {} runs, which left the UI at 1x on HiDPI Linux
+// desktops (#514). Apply the globals before anything touches AWT.
+@OptIn(ExperimentalComposeUiApi::class)
+private fun configureLinuxSwingGlobalsBeforeAwt() {
+    if (DesktopHostOs.current != DesktopHostOs.LINUX) return
+    if (System.getProperty("compose.application.configure.swing.globals") != "true") return
+    // Skiko's detection overwrites sun.java2d.uiScale, so keep an explicitly
+    // set scale (the documented #514 workaround) working by skipping it.
+    configureSwingGlobalsForCompose(
+        useAutoDpiOnLinux = System.getProperty("sun.java2d.uiScale") == null &&
+            System.getProperty("skiko.linux.autodpi", "true") == "true",
+    )
 }
 
 private fun installDesktopOpenUriHandler() {
